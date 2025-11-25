@@ -17,13 +17,31 @@ def get_inventory(file_path):
         sys.exit(1)
     return json.loads(result.stdout)
 
-def check_rds_aurora_health(cluster_name):
-    rds = boto3.client('rds')
+def parse_arn(arn):
+    #ARN format: arn:aws:rds:<region>:<account>:clusters:<cluster-id>
+    parts = arn.split(":")
+    if len(parts) < 6:
+        raise ValueError(f"Invalid ARN: {arn}")
+    service = parts[2]
+    region = parts[3]
+    resource = parts[5]
+    return service, region, resource
+
+def check_rds_aurora_health(arn):
+    service, region, resource = parse_arn(arn)
+    if service != "rds":
+        return False, f"Not an RDS ARN: {arn}"
+    if not resource.startswith("clusters:")
+        return False, f"Not an Aurora cluster ARN: {arn}"
+
+    cluster_id = resource.split(":")[1]    
+    rds = boto3.client('rds', region_name=region)
+
     try:
-        cluster_info = rds.describe_db_clusters(DBClusterIdentifier=cluster_name)
+        cluster_info = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
         cluster_status = cluster_info['DBClusters'][0]['Status']
         if cluster_status != 'available':
-            return False, f"Cluster {cluster_name} status: {cluster_status}"
+            return False, f"cluster {cluster_id} status: {cluster_status}"
 
         # Check instances in cluster
         instance_ids = [inst['DBInstanceldentifier'] for inst in cluster_info['DBClusters'][0]['DBClusterMembers']]
@@ -53,11 +71,11 @@ def main(yaml_file, output_file):
     failed_components = []
     
     for resource in inventory.get("resources", []):
-        if resource.get("type") == "RDSAuroraPostgres":
-            cluster_name = resource.get("name")
-            healthy, details = check_rds_aurora_health(cluster_name)
+        arn = resource.get("arn")
+        if arn and "rds" in arn and "cluster" in arn:
+            healthy, details = check_rds_aurora_health(arn)
             if not healthy:
-                failed_components.append({cluster_name: details})
+                failed_components.append({arn: details})
     
     if failed_components:
         result = f"Failure: Unhealthy components:\n{json.dumps(failed _components, indent=2)}"
