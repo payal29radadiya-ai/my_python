@@ -45,7 +45,7 @@ def main(yaml_file, log_file):
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
-        print("Usage: python deployment_status_check.py <output.json> <deployment_status.log>")
+        print("Usage: python status.py <dummy.json> <output.log>")
         sys.exit(1)
 
     main(sys.argv[1], sys.argv[2])
