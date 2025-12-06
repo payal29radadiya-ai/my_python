@@ -1,160 +1,145 @@
-import subprocess
 import json
+import yaml
+import subprocess
 import boto3
 import sys
-import logging
 
-def run_command(command):
-    """Run a shell command and return the output as a string."""
-    try:
-        result = subprocess.run(command, shell=True, capture_output=True, text=True, check=True)
-        return result.stdout
-    except subprocess.CalledProcessError as e:
-        logging.error(f"Error running command: {e}")
-        sys.exit(1)
-
-def get_inventory_json(yaml_file):
-    """Generate inventory JSON using the eac command."""
-    command = f"eac deployment inventory -f {yaml_file} --json"
-    output = run_command(command)
+# ---------- UTILITY TO RUN INVENTORY COMMAND ----------
+def run_inventory(yaml_file):
+    """Runs the EAC inventory command and returns JSON."""
+    cmd = ["eac", "deployment", "inventory", "-f", yaml_file, "--json"]
+    output = subprocess.check_output(cmd)
     return json.loads(output)
 
-def check_arn_health(arn, region, account_id):
-    """Generalized health check for ARN based on service."""
-    # Parse ARN: arn:aws:service:region:account:resource
-    parts = arn.split(':')
-    if len(parts) < 6:
-        return False, "Invalid ARN format"
-    service = parts[2]
-    resource = ':'.join(parts[5:])
-    
-    client = boto3.client(service, region_name=region)
-    
+# ---------- HEALTH CHECK FUNCTIONS FOR EACH COMPONENT ----------
+
+def check_rds_aurora(arn):
+    rds = boto3.client("rds")
     try:
-        if service == 'lambda':
-            function_name = resource.split(':')[-1]
-            response = client.get_function(FunctionName=function_name)
-            state = response['Configuration']['State']
-            return state == 'Active', f"State: {state}"
-        elif service == 'ecs':
-            # Assume cluster
-            cluster_name = resource.split('/')[-1]
-            response = client.describe_clusters(clusters=[cluster_name])
-            if response['clusters']:
-                status = response['clusters'][0]['status']
-                return status == 'ACTIVE', f"Status: {status}"
-            return False, "Cluster not found"
-        elif service == 'kms':
-            key_id = resource.split('/')[-1]
-            response = client.describe_key(KeyId=key_id)
-            enabled = response['KeyMetadata']['Enabled']
-            return enabled, f"Enabled: {enabled}"
-        elif service == 'sqs':
-            queue_name = resource
-            queue_url = f"https://sqs.{region}.amazonaws.com/{account_id}/{queue_name}"
-            client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
-            return True, "Exists"
-        elif service == 'backup':
-            # For recovery-point
-            recovery_point_arn = arn
-            vault_name = resource.split(':')[1]  # Extract vault name from resource part
-            response = client.describe_recovery_point(BackupVaultName=vault_name, RecoveryPointArn=recovery_point_arn)
-            status = response['Status']
-            return status == 'COMPLETED', f"Status: {status}"
-        elif service == 'ec2':
-            if 'security-group' in resource:
-                sg_id = resource.split('/')[-1]
-                response = client.describe_security_groups(GroupIds=[sg_id])
-                return True, "Exists"
-            else:
-                return False, "Unsupported EC2 resource"
-        elif service == 'rds':
-            if 'cluster-snapshot' in resource:
-                snapshot_id = resource.split(':')[-1]
-                response = client.describe_db_cluster_snapshots(DBClusterSnapshotIdentifier=snapshot_id)
-                status = response['DBClusterSnapshots'][0]['Status']
-                return status == 'available', f"Status: {status}"
-            else:
-                return False, "Unsupported RDS resource"
-        else:
-            return False, f"Unsupported service: {service}"
+        cluster_id = arn.split(":")[-1]
+        resp = rds.describe_db_clusters(DBClusterIdentifier=cluster_id)
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
     except Exception as e:
-        return False, f"Error: {str(e)}"
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
 
-def main(yaml_file):
-    # Configure logging to write to a file
-    logging.basicConfig(filename='health_check.log', level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-    
-    logging.info("Starting health check for deployment inventory.")
-    
-    # Get inventory JSON
-    inventory = get_inventory_json(yaml_file)
-    
-    # Extract environment details
-    deployment = inventory.get('data', {}).get('deployment', {})
-    environment = deployment.get('Environment', {})
-    region = environment.get('awsRegion', 'us-east-1')  # Default if not present
-    account_id = environment.get('awsAccountID', '')
-    
-    all_healthy = True
-    messages = []
-    arn_results = []
-    
-    # Process components dynamically from the JSON
-    components = deployment.get('components', [])
-    for component in components:
-        component_type = component.get('componentType', '')
-        component_name = component.get('componentName', '')
-        tf_modules = component.get('tfModules', [])
-        for tf_module in tf_modules:
-            arns_list = tf_module.get('arns', [])  # List of ARN strings
-            updated_arns = []
-            for arn in arns_list:
-                # ARN is a string, perform health check
-                healthy, message = check_arn_health(arn, region, account_id)
-                if not healthy:
-                    all_healthy = False
-                messages.append(f"{arn} ({component_name}, {component_type}): {message}")
-                
-                # Create a dict for each ARN with health info
-                arn_dict = {
-                    "arn": arn,
-                    "status": "healthy" if healthy else "unhealthy",
-                    "message": message
-                }
-                updated_arns.append(arn_dict)
-                arn_results.append({
-                    "arn": arn,
-                    "componentName": component_name,
-                    "componentType": component_type,
-                    "status": "healthy" if healthy else "unhealthy",
-                    "message": message
-                })
-                logging.info(f"Checked {arn} ({component_name}, {component_type}): {'healthy' if healthy else 'unhealthy'} - {message}")
-            # Update the tf_module's arns with health info
-            tf_module['arns'] = updated_arns
-    
-    # Prepare output in the specified format
-    status = "SUCCESS" if all_healthy else "FAILURE"
-    message = "; ".join(messages) if messages else "All ARNs are healthy"
-    
-    output = {
-        "status": status,
-        "message": message,
-        "data": {
-            "deployment": deployment,  # Updated with health info in arns
-            "arnResults": arn_results  # Additional list for easy access
-        }
-    }
-    
-    # Output results as JSON to CLI (stdout) and log it
-    output_json = json.dumps(output, indent=2)
-    print(output_json)  # Print to CLI
-    logging.info(f"Health check completed. Status: {status}. Results: {output_json}")
+def check_kms(arn):
+    kms = boto3.client("kms")
+    key_id = arn.split("/")[-1]
+    try:
+        resp = kms.describe_key(KeyId=key_id)
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
 
+def check_management_host(arn):
+    ec2 = boto3.client("ec2")
+    instance_id = arn.split("/")[-1]
+    try:
+        resp = ec2.describe_instances(InstanceIds=[instance_id])
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_sqs(arn):
+    sqs = boto3.client("sqs")
+    try:
+        attributes = sqs.get_queue_attributes(
+            QueueUrl=f"https://sqs.amazonaws.com/{arn.split(':')[4]}/{arn.split(':')[-1]}",
+            AttributeNames=['All']
+        )
+        return {"arn": arn, "status": "HEALTHY", "details": attributes}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_iam_role(arn):
+    iam = boto3.client("iam")
+    role_name = arn.split("/")[-1]
+    try:
+        resp = iam.get_role(RoleName=role_name)
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_route53(arn):
+    r53 = boto3.client("route53")
+    try:
+        # hosted zone ID is not inside ARN, so list is used
+        resp = r53.list_resource_record_sets(HostedZoneId="ZONESHOULDPROVIDE")
+        return {"arn": arn, "status": "UNKNOWN", "details": "Route53 ARN does not map directly"}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_nlb(arn):
+    elb = boto3.client("elbv2")
+    lb_arn = arn
+    try:
+        resp = elb.describe_load_balancers(LoadBalancerArns=[lb_arn])
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_alb(arn):
+    return check_nlb(arn)
+
+def check_ecs_cluster(arn):
+    ecs = boto3.client("ecs")
+    try:
+        resp = ecs.describe_clusters(clusters=[arn])
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+def check_lambda(arn):
+    lam = boto3.client("lambda")
+    func = arn.split(":")[-1]
+    try:
+        resp = lam.get_function(FunctionName=func)
+        return {"arn": arn, "status": "HEALTHY", "details": resp}
+    except Exception as e:
+        return {"arn": arn, "status": "UNHEALTHY", "error": str(e)}
+
+# ---------- COMPONENT DISPATCHER ----------
+CHECK_MAP = {
+    "RDSAuroraPostgres": check_rds_aurora,
+    "KMS": check_kms,
+    "ManagementHost": check_management_host,
+    "SQS": check_sqs,
+    "GlobalRoles": check_iam_role,
+    "Roles": check_iam_role,
+    "Route53Record": check_route53,
+    "NetworkLoadBalancer": check_nlb,
+    "ApplicationLoadBalancer": check_alb,
+    "ECSCluster": check_ecs_cluster,
+    "Lambda": check_lambda
+}
+
+# ---------- MAIN PROCESS ----------
+def process_components(inventory_json):
+    results = []
+    components = inventory_json["data"]["deployment"]["components"]
+    for comp in components:
+        ctype = comp["componentType"]
+        cname = comp["componentName"]
+
+        checker = CHECK_MAP.get(ctype)
+        if not checker:
+            results.append({"component": cname, "type": ctype, "error": "No checker implemented"})
+            continue
+
+        for module in comp.get("tfModules", []):
+            for arn in module.get("arns", []):
+                result = checker(arn)
+                result["componentType"] = ctype
+                result["componentName"] = cname
+                results.append(result)
+
+    return results
+
+# ---------- PROGRAM ENTRY ----------
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        print("Usage: python script.py <deployment.yaml>")
-        sys.exit(1)
     yaml_file = sys.argv[1]
-    main(yaml_file)
+
+    inventory_json = run_inventory(yaml_file)
+    checks = process_components(inventory_json)
+
+    print(json.dumps(checks, indent=4, default=str))
