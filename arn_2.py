@@ -1,323 +1,198 @@
-import argparse
-import boto3
-import json
-import logging
 import yaml
-from botocore.exceptions import ClientError, NoCredentialsError
+import json
+import boto3
+import logging
+from botocore.exceptions import ClientError, EndpointConnectionError, NoCredentialsError
+import re
 
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# ------------------------------------------------------------------------------
+# LOGGING
+# ------------------------------------------------------------------------------
+logging.basicConfig(
+    filename="arn_metadata_health_check.log",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s"
+)
+logger = logging.getLogger(__name__)
 
-def load_yaml(file_path):
-    """Load and parse the YAML file."""
+# ------------------------------------------------------------------------------
+# PARSE ARN
+# ------------------------------------------------------------------------------
+def parse_arn(arn: str):
+    """
+    Parse ARN into components.
+    Example ARN Format:
+      arn:aws:rds:us-east-1:111122223333:cluster:mydbcluster
+    """
     try:
-        with open(file_path, 'r') as file:
-            return yaml.safe_load(file)
+        parts = arn.split(':', 5)
+        return {
+            "partition": parts[1],
+            "service": parts[2],
+            "region": parts[3],
+            "account": parts[4],
+            "resource": parts[5]
+        }
     except Exception as e:
-        logging.error(f"Error loading YAML file: {e}")
-        raise
+        logger.error(f"Invalid ARN format: {arn}")
+        return None
 
-def get_arn_resource_type(arn):
-    """Extract the resource type from ARN."""
-    # ARN format: arn:aws:service:region:account:resource
-    parts = arn.split(':')
-    if len(parts) >= 6:
-        return parts[2], parts[5]  # service, resource
-    return None, None
+# ------------------------------------------------------------------------------
+# AWS METADATA GETTERS FOR EACH SERVICE
+# ------------------------------------------------------------------------------
 
-def check_RDSAuroraPostgres(component, region, account_id):
-    """Check status of ARNs for RDSAuroraPostgres component by querying AWS."""
-    client = boto3.client('rds', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'rds' and 'cluster' in resource:
-            cluster_id = resource.split('/')[-1] if '/' in resource else resource
-            try:
-                response = client.describe_db_clusters(DBClusterIdentifier=cluster_id)
-                status = response['DBClusters'][0]['Status']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Cluster status: {status}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        elif service == 'ec2' and 'security-group' in resource:
-            sg_id = resource.split('/')[-1]
-            ec2_client = boto3.client('ec2', region_name=region)
-            try:
-                response = ec2_client.describe_security_groups(GroupIds=[sg_id])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Security group exists"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Security group exists")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        elif service == 'backup' and 'recovery-point' in resource:
-            backup_client = boto3.client('backup', region_name=region)
-            try:
-                response = backup_client.describe_recovery_point(BackupVaultName='default', RecoveryPointArn=arn)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Recovery point exists"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Recovery point exists")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+def get_rds_metadata(parsed):
+    client = boto3.client("rds", region_name=parsed["region"])
+    resource = parsed["resource"]
 
-def check_KMS(component, region, account_id):
-    """Check status of ARNs for KMS component by querying AWS."""
-    client = boto3.client('kms', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'kms':
-            key_id = resource.split('/')[-1] if '/' in resource else resource
-            try:
-                response = client.describe_key(KeyId=key_id)
-                state = response['KeyMetadata']['KeyState']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Key state: {state}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Key state: {state}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    if resource.startswith("cluster:"):
+        cluster = resource.split(":", 1)[1]
+        return client.describe_db_clusters(DBClusterIdentifier=cluster)
 
-def check_ManagementHost(component, region, account_id):
-    """Check status of ARNs for ManagementHost component by querying AWS."""
-    ec2_client = boto3.client('ec2', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'ec2' and 'instance' in resource:
-            instance_id = resource.split('/')[-1]
-            try:
-                response = ec2_client.describe_instances(InstanceIds=[instance_id])
-                state = response['Reservations'][0]['Instances'][0]['State']['Name']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Instance state: {state}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Instance state: {state}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    if resource.startswith("cluster-snapshot:"):
+        snap = resource.split(":", 1)[1]
+        return client.describe_db_cluster_snapshots(DBClusterSnapshotIdentifier=snap)
 
-def check_SQS(component, region, account_id):
-    """Check status of ARNs for SQS component by querying AWS."""
-    client = boto3.client('sqs', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'sqs':
-            queue_url = f"https://sqs.{region}.amazonaws.com/{account_id}/{resource.split('/')[-1]}"
-            try:
-                response = client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Queue exists and accessible"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Queue exists and accessible")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    if resource.startswith("db:"):
+        db = resource.split(":", 1)[1]
+        return client.describe_db_instances(DBInstanceIdentifier=db)
 
-def check_GlobalRoles(component, region, account_id):
-    """Check status of ARNs for GlobalRoles component by querying AWS."""
-    iam_client = boto3.client('iam')
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'iam' and 'role' in resource:
-            role_name = resource.split('/')[-1]
-            try:
-                response = iam_client.get_role(RoleName=role_name)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Role exists"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Role exists")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    raise Exception("Unsupported RDS ARN resource type")
 
-def check_Roles(component, region, account_id):
-    """Check status of ARNs for Roles component by querying AWS."""
-    return check_GlobalRoles(component, region, account_id)
+def get_ec2_metadata(parsed):
+    client = boto3.client("ec2", region_name=parsed["region"])
+    resource = parsed["resource"]
 
-def check_Route53Record(component, region, account_id):
-    """Check status of ARNs for Route53Record component by querying AWS."""
-    client = boto3.client('route53')
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'route53':
-            hosted_zone_id = resource.split('/')[-1]
-            try:
-                response = client.get_hosted_zone(Id=hosted_zone_id)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Hosted zone exists"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Hosted zone exists")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    if resource.startswith("security-group/"):
+        sg_id = resource.split("/")[1]
+        return client.describe_security_groups(GroupIds=[sg_id])
 
-def check_NetworkLoadBalancer(component, region, account_id):
-    """Check status of ARNs for NetworkLoadBalancer component by querying AWS."""
-    elb_client = boto3.client('elbv2', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'elasticloadbalancing':
-            lb_arn = arn
-            try:
-                response = elb_client.describe_load_balancers(LoadBalancerArns=[lb_arn])
-                state = response['LoadBalancers'][0]['State']['Code']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Load balancer state: {state}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Load balancer state: {state}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+    return {"status": "UNKNOWN_EC2_RESOURCE"}
 
-def check_ApplicationLoadBalancer(component, region, account_id):
-    """Check status of ARNs for ApplicationLoadBalancer component by querying AWS."""
-    return check_NetworkLoadBalancer(component, region, account_id)
+def get_kms_metadata(parsed):
+    client = boto3.client("kms", region_name=parsed["region"])
+    return client.describe_key(KeyId=f"arn:{parsed['partition']}:kms:{parsed['region']}:{parsed['account']}:{parsed['resource']}")
 
-def check_ECSCluster(component, region, account_id):
-    """Check status of ARNs for ECSCluster component by querying AWS."""
-    client = boto3.client('ecs', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'ecs' and 'cluster' in resource:
-            cluster_name = resource.split('/')[-1]
-            try:
-                response = client.describe_clusters(clusters=[cluster_name])
-                status = response['clusters'][0]['status']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Cluster status: {status}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+def get_sqs_metadata(parsed):
+    queue_name = parsed["resource"]
+    queue_url = f"https://sqs.{parsed['region']}.amazonaws.com/{parsed['account']}/{queue_name}"
+    client = boto3.client("sqs", region_name=parsed["region"])
+    return client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["All"])
 
-def check_Lambda(component, region, account_id):
-    """Check status of ARNs for Lambda component by querying AWS."""
-    client = boto3.client('lambda', region_name=region)
-    statuses = []
-    for arn in component.get('tfModules', [{}])[0].get('arns', []):
-        service, resource = get_arn_resource_type(arn)
-        if service == 'lambda':
-            function_name = resource.split(':')[-1] if ':' in resource else resource
-            try:
-                response = client.get_function(FunctionName=function_name)
-                state = response['Configuration']['State']
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Function state: {state}"})
-                logging.info(f"Checked ARN {arn}: SUCCESS - Function state: {state}")
-            except ClientError as e:
-                statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
-                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
-        else:
-            statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
-            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
-    return statuses
+def get_lambda_metadata(parsed):
+    function_name = parsed["resource"].split(":")[-1]
+    client = boto3.client("lambda", region_name=parsed["region"])
+    return client.get_function(FunctionName=function_name)
 
-def main():
-    parser = argparse.ArgumentParser(description="Check ARN statuses for AWS components from YAML file by querying AWS.")
-    parser.add_argument('-f', '--yaml_file', required=True, help='Path to the YAML file')
-    parser.add_argument('--log_file', required=True, help='Path to the log file')
+def get_iam_metadata(parsed):
+    client = boto3.client("iam")
+    resource = parsed["resource"]
+
+    if resource.startswith("role/"):
+        role = resource.split("/")[1]
+        return client.get_role(RoleName=role)
+
+    if resource.startswith("policy/"):
+        policy = resource.split("/")[1]
+        return client.get_policy(PolicyArn=f"arn:aws:iam::{parsed['account']}:policy/{policy}")
+
+    return {"status": "UNKNOWN_IAM_RESOURCE"}
+
+def get_elbv2_metadata(parsed):
+    client = boto3.client("elbv2", region_name=parsed["region"])
+    return client.describe_load_balancers(LoadBalancerArns=[
+        f"arn:{parsed['partition']}:{parsed['service']}:{parsed['region']}:{parsed['account']}:{parsed['resource']}"
+    ])
+
+def get_backup_metadata(parsed):
+    client = boto3.client("backup", region_name=parsed["region"])
+    return client.get_recovery_point(
+        BackupVaultName="default",
+        RecoveryPointArn=f"arn:{parsed['partition']}:backup:{parsed['region']}:{parsed['account']}:{parsed['resource']}"
+    )
+
+
+# ------------------------------------------------------------------------------
+# SERVICE → METADATA FUNCTION MAP
+# ------------------------------------------------------------------------------
+SERVICE_HANDLERS = {
+    "rds": get_rds_metadata,
+    "ec2": get_ec2_metadata,
+    "kms": get_kms_metadata,
+    "sqs": get_sqs_metadata,
+    "lambda": get_lambda_metadata,
+    "iam": get_iam_metadata,
+    "elasticloadbalancing": get_elbv2_metadata,
+    "backup": get_backup_metadata,
+}
+
+# ------------------------------------------------------------------------------
+# MAIN ARN VALIDATION
+# ------------------------------------------------------------------------------
+def validate_arn(arn):
+    logger.info(f"Checking ARN: {arn}")
+
+    parsed = parse_arn(arn)
+    if not parsed:
+        return {"arn": arn, "status": "INVALID_ARN_FORMAT"}
+
+    service = parsed["service"]
+
+    if service not in SERVICE_HANDLERS:
+        return {"arn": arn, "status": "UNSUPPORTED_SERVICE"}
+
+    try:
+        metadata = SERVICE_HANDLERS[service](parsed)
+        return {
+            "arn": arn,
+            "status": "SUCCESS",
+            "metadata": metadata
+        }
+
+    except ClientError as ce:
+        return {"arn": arn, "status": "FAILED", "error": str(ce)}
+    except Exception as e:
+        return {"arn": arn, "status": "FAILED", "error": str(e)}
+
+# ------------------------------------------------------------------------------
+# PROCESS YAML COMPONENTS
+# ------------------------------------------------------------------------------
+def process_yaml(yaml_file):
+    with open(yaml_file, "r") as f:
+        deployment = yaml.safe_load(f)
+
+    components = deployment["data"]["deployment"]["components"]
+    final_output = []
+
+    for comp in components:
+        comp_name = comp["componentName"]
+        comp_type = comp["componentType"]
+        arns = comp.get("arns", [])
+
+        logger.info(f"Processing component: {comp_name}")
+
+        comp_result = {
+            "componentName": comp_name,
+            "componentType": comp_type,
+            "arnResults": []
+        }
+
+        for arn in arns:
+            comp_result["arnResults"].append(validate_arn(arn))
+
+        final_output.append(comp_result)
+
+    return final_output
+
+# ------------------------------------------------------------------------------
+# CLI ENTRY POINT
+# ------------------------------------------------------------------------------
+if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="AWS ARN metadata/health check script")
+    parser.add_argument("yaml_file", help="Deployment YAML with components and ARNs")
     args = parser.parse_args()
 
-    # Set up file logging
-    file_handler = logging.FileHandler(args.log_file)
-    file_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
-    logging.getLogger().addHandler(file_handler)
-
-    try:
-        data = load_yaml(args.yaml_file)
-        deployment = data.get('deployment', {})
-        environment = deployment.get('Environment', {})
-        region = environment.get('awsRegion')
-        account_id = environment.get('awsAccountID')
-        components = deployment.get('components', [])
-
-        component_functions = {
-            'RDSAuroraPostgres': check_RDSAuroraPostgres,
-            'KMS': check_KMS,
-            'ManagementHost': check_ManagementHost,
-            'SQS': check_SQS,
-            'GlobalRoles': check_GlobalRoles,
-            'Roles': check_Roles,
-            'Route53Record': check_Route53Record,
-            'NetworkLoadBalancer': check_NetworkLoadBalancer,
-            'ApplicationLoadBalancer': check_ApplicationLoadBalancer,
-            'ECSCluster': check_ECSCluster,
-            'Lambda': check_Lambda
-        }
-
-        updated_components = []
-        overall_status = "SUCCESS"
-        messages = []
-
-        for component in components:
-            comp_type = component.get('componentType')
-            comp_name = component.get('componentName')
-            if comp_type in component_functions:
-                try:
-                    statuses = component_functions[comp_type](component, region, account_id)
-                    component['arn_statuses'] = statuses
-                    for status in statuses:
-                        if status['status'] != 'SUCCESS':
-                            overall_status = "FAILED"
-                            messages.append(f"{comp_type} {comp_name}: {status['message']}")
-                except Exception as e:
-                    logging.error(f"Error checking {comp_type} {comp_name}: {e}")
-                    overall_status = "FAILED"
-                    messages.append(f"Error checking {comp_type} {comp_name}: {str(e)}")
-            else:
-                logging.warning(f"No function for component type: {comp_type}")
-                messages.append(f"No check function for {comp_type}")
-            updated_components.append(component)
-
-        output = {
-            "status": overall_status,
-            "message": "; ".join(messages) if messages else "All ARN health checks passed",
-            "data": {
-                "deployment": {
-                    "sealID": deployment.get('sealID'),
-                    "modelName": deployment.get('modelName'),
-                    "modelVersion": deployment.get('modelVersion'),
-                    "deploymentName": deployment.get('deploymentName'),
-                    "Environment": environment,
-                    "components": updated_components
-                }
-            }
-        }
-
-        print(json.dumps(output, indent=2))
-
-    except NoCredentialsError:
-        logging.error("AWS credentials not found. Please configure AWS credentials.")
-        print(json.dumps({"status": "FAILED", "message": "AWS credentials not found", "data": {}}))
-    except Exception as e:
-        logging.error(f"Unexpected error: {e}")
-        print(json.dumps({"status": "FAILED", "message": str(e), "data": {}}))
-
-if __name__ == "__main__":
-    main()
+    results = process_yaml(args.yaml_file)
+    print(json.dumps(results, indent=2))
