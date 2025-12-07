@@ -37,25 +37,32 @@ def check_RDSAuroraPostgres(component, region, account_id):
                 response = client.describe_db_clusters(DBClusterIdentifier=cluster_id)
                 status = response['DBClusters'][0]['Status']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Cluster status: {status}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         elif service == 'ec2' and 'security-group' in resource:
             sg_id = resource.split('/')[-1]
             ec2_client = boto3.client('ec2', region_name=region)
             try:
                 response = ec2_client.describe_security_groups(GroupIds=[sg_id])
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": "Security group exists"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Security group exists")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         elif service == 'backup' and 'recovery-point' in resource:
             backup_client = boto3.client('backup', region_name=region)
             try:
                 response = backup_client.describe_recovery_point(BackupVaultName='default', RecoveryPointArn=arn)
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": "Recovery point exists"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Recovery point exists")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_KMS(component, region, account_id):
@@ -70,10 +77,13 @@ def check_KMS(component, region, account_id):
                 response = client.describe_key(KeyId=key_id)
                 state = response['KeyMetadata']['KeyState']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Key state: {state}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Key state: {state}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_ManagementHost(component, region, account_id):
@@ -88,10 +98,13 @@ def check_ManagementHost(component, region, account_id):
                 response = ec2_client.describe_instances(InstanceIds=[instance_id])
                 state = response['Reservations'][0]['Instances'][0]['State']['Name']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Instance state: {state}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Instance state: {state}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_SQS(component, region, account_id):
@@ -105,10 +118,13 @@ def check_SQS(component, region, account_id):
             try:
                 response = client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": "Queue exists and accessible"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Queue exists and accessible")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_GlobalRoles(component, region, account_id):
@@ -122,10 +138,13 @@ def check_GlobalRoles(component, region, account_id):
             try:
                 response = iam_client.get_role(RoleName=role_name)
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": "Role exists"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Role exists")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_Roles(component, region, account_id):
@@ -143,10 +162,13 @@ def check_Route53Record(component, region, account_id):
             try:
                 response = client.get_hosted_zone(Id=hosted_zone_id)
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": "Hosted zone exists"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Hosted zone exists")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_NetworkLoadBalancer(component, region, account_id):
@@ -161,10 +183,13 @@ def check_NetworkLoadBalancer(component, region, account_id):
                 response = elb_client.describe_load_balancers(LoadBalancerArns=[lb_arn])
                 state = response['LoadBalancers'][0]['State']['Code']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Load balancer state: {state}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Load balancer state: {state}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_ApplicationLoadBalancer(component, region, account_id):
@@ -183,10 +208,13 @@ def check_ECSCluster(component, region, account_id):
                 response = client.describe_clusters(clusters=[cluster_name])
                 status = response['clusters'][0]['status']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Cluster status: {status}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def check_Lambda(component, region, account_id):
@@ -201,10 +229,13 @@ def check_Lambda(component, region, account_id):
                 response = client.get_function(FunctionName=function_name)
                 state = response['Configuration']['State']
                 statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Function state: {state}"})
+                logging.info(f"Checked ARN {arn}: SUCCESS - Function state: {state}")
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
+                logging.error(f"Checked ARN {arn}: FAILED - {str(e)}")
         else:
             statuses.append({"arn": arn, "status": "UNKNOWN", "message": "Unsupported ARN type"})
+            logging.warning(f"Checked ARN {arn}: UNKNOWN - Unsupported ARN type")
     return statuses
 
 def main():
