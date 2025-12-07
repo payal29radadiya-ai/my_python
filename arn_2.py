@@ -26,7 +26,7 @@ def get_arn_resource_type(arn):
     return None, None
 
 def check_RDSAuroraPostgres(component, region, account_id):
-    """Check status of ARNs for RDSAuroraPostgres component."""
+    """Check status of ARNs for RDSAuroraPostgres component by querying AWS."""
     client = boto3.client('rds', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -35,7 +35,8 @@ def check_RDSAuroraPostgres(component, region, account_id):
             cluster_id = resource.split('/')[-1] if '/' in resource else resource
             try:
                 response = client.describe_db_clusters(DBClusterIdentifier=cluster_id)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Cluster exists"})
+                status = response['DBClusters'][0]['Status']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         elif service == 'ec2' and 'security-group' in resource:
@@ -47,7 +48,6 @@ def check_RDSAuroraPostgres(component, region, account_id):
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         elif service == 'backup' and 'recovery-point' in resource:
-            # For backup, we can check if the recovery point exists
             backup_client = boto3.client('backup', region_name=region)
             try:
                 response = backup_client.describe_recovery_point(BackupVaultName='default', RecoveryPointArn=arn)
@@ -59,7 +59,7 @@ def check_RDSAuroraPostgres(component, region, account_id):
     return statuses
 
 def check_KMS(component, region, account_id):
-    """Check status of ARNs for KMS component."""
+    """Check status of ARNs for KMS component by querying AWS."""
     client = boto3.client('kms', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -68,7 +68,8 @@ def check_KMS(component, region, account_id):
             key_id = resource.split('/')[-1] if '/' in resource else resource
             try:
                 response = client.describe_key(KeyId=key_id)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Key exists"})
+                state = response['KeyMetadata']['KeyState']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Key state: {state}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -76,8 +77,7 @@ def check_KMS(component, region, account_id):
     return statuses
 
 def check_ManagementHost(component, region, account_id):
-    """Check status of ARNs for ManagementHost component."""
-    # Assuming ManagementHost is an EC2 instance
+    """Check status of ARNs for ManagementHost component by querying AWS."""
     ec2_client = boto3.client('ec2', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -86,7 +86,8 @@ def check_ManagementHost(component, region, account_id):
             instance_id = resource.split('/')[-1]
             try:
                 response = ec2_client.describe_instances(InstanceIds=[instance_id])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Instance exists"})
+                state = response['Reservations'][0]['Instances'][0]['State']['Name']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Instance state: {state}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -94,7 +95,7 @@ def check_ManagementHost(component, region, account_id):
     return statuses
 
 def check_SQS(component, region, account_id):
-    """Check status of ARNs for SQS component."""
+    """Check status of ARNs for SQS component by querying AWS."""
     client = boto3.client('sqs', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -103,7 +104,7 @@ def check_SQS(component, region, account_id):
             queue_url = f"https://sqs.{region}.amazonaws.com/{account_id}/{resource.split('/')[-1]}"
             try:
                 response = client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=['All'])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Queue exists"})
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Queue exists and accessible"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -111,7 +112,7 @@ def check_SQS(component, region, account_id):
     return statuses
 
 def check_GlobalRoles(component, region, account_id):
-    """Check status of ARNs for GlobalRoles component."""
+    """Check status of ARNs for GlobalRoles component by querying AWS."""
     iam_client = boto3.client('iam')
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -128,19 +129,16 @@ def check_GlobalRoles(component, region, account_id):
     return statuses
 
 def check_Roles(component, region, account_id):
-    """Check status of ARNs for Roles component."""
-    # Same as GlobalRoles
+    """Check status of ARNs for Roles component by querying AWS."""
     return check_GlobalRoles(component, region, account_id)
 
 def check_Route53Record(component, region, account_id):
-    """Check status of ARNs for Route53Record component."""
+    """Check status of ARNs for Route53Record component by querying AWS."""
     client = boto3.client('route53')
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
         service, resource = get_arn_resource_type(arn)
         if service == 'route53':
-            # Route53 ARNs might be for hosted zones or records, but typically records are not ARNs directly
-            # Assuming it's a hosted zone
             hosted_zone_id = resource.split('/')[-1]
             try:
                 response = client.get_hosted_zone(Id=hosted_zone_id)
@@ -152,7 +150,7 @@ def check_Route53Record(component, region, account_id):
     return statuses
 
 def check_NetworkLoadBalancer(component, region, account_id):
-    """Check status of ARNs for NetworkLoadBalancer component."""
+    """Check status of ARNs for NetworkLoadBalancer component by querying AWS."""
     elb_client = boto3.client('elbv2', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -161,7 +159,8 @@ def check_NetworkLoadBalancer(component, region, account_id):
             lb_arn = arn
             try:
                 response = elb_client.describe_load_balancers(LoadBalancerArns=[lb_arn])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Load balancer exists"})
+                state = response['LoadBalancers'][0]['State']['Code']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Load balancer state: {state}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -169,12 +168,11 @@ def check_NetworkLoadBalancer(component, region, account_id):
     return statuses
 
 def check_ApplicationLoadBalancer(component, region, account_id):
-    """Check status of ARNs for ApplicationLoadBalancer component."""
-    # Same as NetworkLoadBalancer
+    """Check status of ARNs for ApplicationLoadBalancer component by querying AWS."""
     return check_NetworkLoadBalancer(component, region, account_id)
 
 def check_ECSCluster(component, region, account_id):
-    """Check status of ARNs for ECSCluster component."""
+    """Check status of ARNs for ECSCluster component by querying AWS."""
     client = boto3.client('ecs', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -183,7 +181,8 @@ def check_ECSCluster(component, region, account_id):
             cluster_name = resource.split('/')[-1]
             try:
                 response = client.describe_clusters(clusters=[cluster_name])
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Cluster exists"})
+                status = response['clusters'][0]['status']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Cluster status: {status}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -191,7 +190,7 @@ def check_ECSCluster(component, region, account_id):
     return statuses
 
 def check_Lambda(component, region, account_id):
-    """Check status of ARNs for Lambda component."""
+    """Check status of ARNs for Lambda component by querying AWS."""
     client = boto3.client('lambda', region_name=region)
     statuses = []
     for arn in component.get('tfModules', [{}])[0].get('arns', []):
@@ -200,7 +199,8 @@ def check_Lambda(component, region, account_id):
             function_name = resource.split(':')[-1] if ':' in resource else resource
             try:
                 response = client.get_function(FunctionName=function_name)
-                statuses.append({"arn": arn, "status": "SUCCESS", "message": "Function exists"})
+                state = response['Configuration']['State']
+                statuses.append({"arn": arn, "status": "SUCCESS", "message": f"Function state: {state}"})
             except ClientError as e:
                 statuses.append({"arn": arn, "status": "FAILED", "message": str(e)})
         else:
@@ -208,7 +208,7 @@ def check_Lambda(component, region, account_id):
     return statuses
 
 def main():
-    parser = argparse.ArgumentParser(description="Check ARN statuses for AWS components from YAML file.")
+    parser = argparse.ArgumentParser(description="Check ARN statuses for AWS components from YAML file by querying AWS.")
     parser.add_argument('-f', '--yaml_file', required=True, help='Path to the YAML file')
     parser.add_argument('--log_file', required=True, help='Path to the log file')
     args = parser.parse_args()
@@ -225,9 +225,6 @@ def main():
         region = environment.get('awsRegion')
         account_id = environment.get('awsAccountID')
         components = deployment.get('components', [])
-
-        # Assume AWS credentials are set via environment or profile
-        # If not, handle NoCredentialsError
 
         component_functions = {
             'RDSAuroraPostgres': check_RDSAuroraPostgres,
@@ -269,7 +266,7 @@ def main():
 
         output = {
             "status": overall_status,
-            "message": "; ".join(messages) if messages else "All checks passed",
+            "message": "; ".join(messages) if messages else "All ARN health checks passed",
             "data": {
                 "deployment": {
                     "sealID": deployment.get('sealID'),
@@ -285,7 +282,7 @@ def main():
         print(json.dumps(output, indent=2))
 
     except NoCredentialsError:
-        logging.error("AWS credentials not found.")
+        logging.error("AWS credentials not found. Please configure AWS credentials.")
         print(json.dumps({"status": "FAILED", "message": "AWS credentials not found", "data": {}}))
     except Exception as e:
         logging.error(f"Unexpected error: {e}")
