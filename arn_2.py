@@ -1,118 +1,199 @@
-import subprocess
+#!/usr/bin/env python3
 import json
 import boto3
 import logging
+import argparse
+from botocore.exceptions import ClientError, EndpointConnectionError
 
-# --- Setup logging ---
+
+#########################################
+# Logging Configuration
+#########################################
 logging.basicConfig(
-    filename="component_status.log",
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s"
+    filename='infra_health.log',
+    filemode='a',
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
 
-def run_inventory(yaml_file):
-    """Run CLI to get deployment inventory JSON."""
-    cmd = ["eac", "deployment", "inventory", "-f", yaml_file, "--json"]
-    result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-    return json.loads(result.stdout)
+logger = logging.getLogger()
 
-# --- Component-specific functions ---
-def check_rdsaurora(arn, region):
-    client = boto3.client("rds", region_name=region)
+
+#########################################
+# Safe AWS call wrapper
+#########################################
+def safe_call(fn, **kwargs):
     try:
-        if ":cluster-snapshot:" in arn:
-            snapshot_id = arn.split(":")[-1]
-            resp = client.describe_db_cluster_snapshots(DBClusterSnapshotIdentifier=snapshot_id)
-            status = resp["DBClusterSnapshots"][0]["Status"]
-        elif ":cluster:" in arn:
-            cluster_id = arn.split(":")[-1]
-            resp = client.describe_db_clusters(DBClusterIdentifier=cluster_id)
-            status = resp["DBClusters"][0]["Status"]
-        else:
-            status = "Unknown"
-        return "Success" if status.lower() in ["available", "active"] else "Failed"
+        return fn(**kwargs), None
+    except (ClientError, EndpointConnectionError) as e:
+        return None, str(e)
     except Exception as e:
-        logging.error(f"RDSAurora check failed for {arn}: {e}")
-        return "Failed"
+        return None, str(e)
 
-def check_kms(arn, region):
-    client = boto3.client("kms", region_name=region)
+
+#########################################
+# Individual Component Health Checkers
+#########################################
+def check_rds(name):
+    client = boto3.client('rds')
+    data, err = safe_call(client.describe_db_clusters, DBClusterIdentifier=name)
+
+    if err:
+        return {"componentType": "RDSAuroraPostgres", "componentName": name, "status": "DOWN", "error": err}
+
+    status = data["DBClusters"][0]["Status"]
+    return {"componentType": "RDSAuroraPostgres", "componentName": name, "status": status}
+
+
+def check_kms(name):
+    client = boto3.client('kms')
+    data, err = safe_call(client.describe_key, KeyId=name)
+
+    if err:
+        return {"componentType": "KMS", "componentName": name, "status": "DOWN", "error": err}
+
+    enabled = data["KeyMetadata"]["Enabled"]
+    return {"componentType": "KMS", "componentName": name, "status": "Enabled" if enabled else "Disabled"}
+
+
+def check_sqs(name):
+    client = boto3.client('sqs')
     try:
-        key_id = arn.split("/")[-1]
-        resp = client.describe_key(KeyId=key_id)
-        status = resp["KeyMetadata"]["KeyState"]
-        return "Success" if status.lower() == "enabled" else "Failed"
+        q_url = client.get_queue_url(QueueName=name)["QueueUrl"]
+        attrs = client.get_queue_attributes(QueueUrl=q_url, AttributeNames=['All'])
+        return {"componentType": "SQS", "componentName": name, "status": "UP", "attributes": attrs["Attributes"]}
     except Exception as e:
-        logging.error(f"KMS check failed for {arn}: {e}")
-        return "Failed"
+        return {"componentType": "SQS", "componentName": name, "status": "DOWN", "error": str(e)}
 
-def check_sqs(arn, region):
-    client = boto3.client("sqs", region_name=region)
+
+def check_nlb(name):
+    client = boto3.client('elbv2')
+    data, err = safe_call(client.describe_load_balancers, Names=[name])
+
+    if err:
+        return {"componentType": "NetworkLoadBalancer", "componentName": name, "status": "DOWN", "error": err}
+
+    state = data["LoadBalancers"][0]["State"]["Code"]
+    return {"componentType": "NetworkLoadBalancer", "componentName": name, "status": state}
+
+
+def check_alb(name):
+    client = boto3.client('elbv2')
+    data, err = safe_call(client.describe_load_balancers, Names=[name])
+
+    if err:
+        return {"componentType": "ApplicationLoadBalancer", "componentName": name, "status": "DOWN", "error": err}
+
+    state = data["LoadBalancers"][0]["State"]["Code"]
+    return {"componentType": "ApplicationLoadBalancer", "componentName": name, "status": state}
+
+
+def check_ecs(name):
+    client = boto3.client('ecs')
+    data, err = safe_call(client.describe_clusters, clusters=[name])
+
+    if err:
+        return {"componentType": "ECSCluster", "componentName": name, "status": "DOWN", "error": err}
+
+    status = data["clusters"][0]["status"]
+    return {"componentType": "ECSCluster", "componentName": name, "status": status}
+
+
+def check_lambda(name):
+    client = boto3.client('lambda')
+    data, err = safe_call(client.get_function, FunctionName=name)
+
+    if err:
+        return {"componentType": "Lambda", "componentName": name, "status": "DOWN", "error": err}
+
+    return {"componentType": "Lambda", "componentName": name, "status": "UP"}
+
+
+def check_route53(name):
+    client = boto3.client('route53')
     try:
-        queue_name = arn.split(":")[-1]
-        queue_url = client.get_queue_url(QueueName=queue_name)["QueueUrl"]
-        # If we can fetch attributes, queue is healthy
-        client.get_queue_attributes(QueueUrl=queue_url, AttributeNames=["All"])
-        return "Success"
+        client.list_resource_record_sets(HostedZoneId=name)
+        return {"componentType": "Route53Record", "componentName": name, "status": "UP"}
     except Exception as e:
-        logging.error(f"SQS check failed for {arn}: {e}")
-        return "Failed"
+        return {"componentType": "Route53Record", "componentName": name, "status": "DOWN", "error": str(e)}
 
-def check_lambda(arn, region):
-    client = boto3.client("lambda", region_name=region)
+
+def check_roles(name):
+    client = boto3.client('iam')
     try:
-        func_name = arn.split(":")[-1]
-        resp = client.get_function(FunctionName=func_name)
-        state = resp["Configuration"].get("State", "Unknown")
-        return "Success" if state.lower() == "active" else "Failed"
+        client.get_role(RoleName=name)
+        return {"componentType": "Roles", "componentName": name, "status": "UP"}
     except Exception as e:
-        logging.error(f"Lambda check failed for {arn}: {e}")
-        return "Failed"
+        return {"componentType": "Roles", "componentName": name, "status": "DOWN", "error": str(e)}
 
-def check_ecs(arn, region):
-    client = boto3.client("ecs", region_name=region)
-    try:
-        cluster_name = arn.split("/")[-1]
-        resp = client.describe_clusters(clusters=[cluster_name])
-        status = resp["clusters"][0]["status"]
-        return "Success" if status.lower() == "active" else "Failed"
-    except Exception as e:
-        logging.error(f"ECS check failed for {arn}: {e}")
-        return "Failed"
 
-# --- Dispatcher ---
-def check_component(component_type, arn, region):
-    if component_type == "RDSAuroraPostgres":
-        return check_rdsaurora(arn, region)
-    elif component_type == "KMS":
-        return check_kms(arn, region)
-    elif component_type == "SQS":
-        return check_sqs(arn, region)
-    elif component_type == "Lambda":
-        return check_lambda(arn, region)
-    elif component_type == "ECSCluster":
-        return check_ecs(arn, region)
-    else:
-        logging.warning(f"No checker implemented for {component_type}")
-        return "Failed"
+def check_global_roles(name):
+    return check_roles(name)
 
-def main(yaml_file):
-    data = run_inventory(yaml_file)
-    region = data["data"]["deployment"]["Environment"]["awsRegion"]
-    components = data["data"]["deployment"]["components"]
 
-    results = {}
-    for comp in components:
-        ctype = comp["componentType"]
-        cname = comp["componentName"]
-        results[cname] = {}
-        for tfm in comp.get("tfModules", []):
-            for arn in tfm.get("arns", []):
-                status = check_component(ctype, arn, region)
-                results[cname][arn] = status
-                logging.info(f"{cname} ({ctype}) - {arn} -> {status}")
+def check_mgmt_host(name):
+    # Infra-only placeholder
+    return {"componentType": "ManagementHost", "componentName": name, "status": "N/A"}
 
-    print(json.dumps(results, indent=2))
+
+#########################################
+# Component-type → function mapping
+#########################################
+CHECK_MAP = {
+    "RDSAuroraPostgres": check_rds,
+    "KMS": check_kms,
+    "SQS": check_sqs,
+    "NetworkLoadBalancer": check_nlb,
+    "ApplicationLoadBalancer": check_alb,
+    "ECSCluster": check_ecs,
+    "Lambda": check_lambda,
+    "Route53Record": check_route53,
+    "Roles": check_roles,
+    "GlobalRoles": check_global_roles,
+    "ManagementHost": check_mgmt_host
+}
+
+
+#########################################
+# Main Program
+#########################################
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--json_file", required=True,
+                        help="JSON output from: eac deployment inventory deployment.yaml --json")
+    args = parser.parse_args()
+
+    with open(args.json_file) as f:
+        items = json.load(f)
+
+    results = []
+
+    for comp in items:
+        ctype = comp.get("Type")
+        cname = comp.get("Name")
+
+        logger.info(f"Checking {ctype}: {cname}")
+
+        checker = CHECK_MAP.get(ctype)
+
+        if not checker:
+            result = {"componentType": ctype, "componentName": cname, "status": "UNKNOWN"}
+            results.append(result)
+            logger.warning(f"No checker for {ctype}")
+            continue
+
+        result = checker(cname)
+        results.append(result)
+
+        logger.info(f"Result: {result}")
+
+    # Output to CLI
+    print(json.dumps(results, indent=4))
+
+    # Also store results in log file
+    logger.info("Final Output:")
+    logger.info(json.dumps(results, indent=4))
+
 
 if __name__ == "__main__":
-    main("deployment.yaml")
+    main()
