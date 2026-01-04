@@ -1,7 +1,7 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>AWS Compotant Health Check</title>
+    <title>AWS Component Health Check</title>
     <style>
         body { font-family: Arial; margin: 40px; }
         .step { margin: 10px 0; }
@@ -14,28 +14,32 @@
 
 <h2>AWS YAML Health Check</h2>
 
-<form id="uploadForm" action="javascript:void(0);" enctype="multipart/form-data">
-    <input type="file" name="file" accept=".yml,.yaml" required />
-    <br><br>
-    <button type="submit">Upload & Validate</button>
-</form>
+<input type="file" id="fileInput" accept=".yml,.yaml" />
+<br><br>
+<button id="uploadBtn" type="button">Upload & Validate</button>
 
 <div id="status"></div>
 <pre id="result"></pre>
 
 <script>
-document.getElementById("uploadForm").addEventListener("submit", async function (e) {
-    e.preventDefault();   // ⛔ stop browser redirect
+document.getElementById("uploadBtn").addEventListener("click", async function () {
 
+    const fileInput = document.getElementById("fileInput");
     const statusDiv = document.getElementById("status");
     const resultDiv = document.getElementById("result");
+
+    if (!fileInput.files.length) {
+        statusDiv.innerHTML = <div class="error">Please select a YAML file</div>;
+        return;
+    }
 
     statusDiv.innerHTML = "Processing...";
     resultDiv.textContent = "";
 
-    try {
-        const formData = new FormData(this);
+    const formData = new FormData();
+    formData.append("file", fileInput.files[0]);
 
+    try {
         const response = await fetch("/upload", {
             method: "POST",
             body: formData
@@ -56,11 +60,10 @@ document.getElementById("uploadForm").addEventListener("submit", async function 
         resultDiv.textContent = JSON.stringify(data.health_report, null, 2);
 
     } catch (err) {
-        statusDiv.innerHTML = <div class="error">Error: ${err.message}</div>;
+        statusDiv.innerHTML = <div class="error">${err.message}</div>;
     }
 });
 </script>
-
 
 </body>
 </html>
