@@ -14,7 +14,7 @@
 
 <h2>AWS YAML Health Check</h2>
 
-<form id="uploadForm">
+<form id="uploadForm" action="javascript:void(0);" enctype="multipart/form-data">
     <input type="file" name="file" accept=".yml,.yaml" required />
     <br><br>
     <button type="submit">Upload & Validate</button>
@@ -24,29 +24,43 @@
 <pre id="result"></pre>
 
 <script>
-document.getElementById("uploadForm").addEventListener("submit", async function(e) {
-    e.preventDefault();
-    document.getElementById("status").innerHTML = "Processing...";
-    document.getElementById("result").textContent = "";
+document.getElementById("uploadForm").addEventListener("submit", async function (e) {
+    e.preventDefault();   // ⛔ stop browser redirect
 
-    const formData = new FormData(this);
+    const statusDiv = document.getElementById("status");
+    const resultDiv = document.getElementById("result");
 
-    const response = await fetch("/upload", {
-        method: "POST",
-        body: formData
-    });
+    statusDiv.innerHTML = "Processing...";
+    resultDiv.textContent = "";
 
-    const data = await response.json();
+    try {
+        const formData = new FormData(this);
 
-    let statusHtml = "";
-    data.steps.forEach(step => {
-        statusHtml += <div class="step ${step.status}">${step.message}</div>;
-    });
+        const response = await fetch("/upload", {
+            method: "POST",
+            body: formData
+        });
 
-    document.getElementById("status").innerHTML = statusHtml;
-    document.getElementById("result").textContent = JSON.stringify(data.health_report, null, 2);
+        if (!response.ok) {
+            throw new Error("Upload failed");
+        }
+
+        const data = await response.json();
+
+        let statusHtml = "";
+        data.steps.forEach(step => {
+            statusHtml += <div class="step ${step.status}">${step.message}</div>;
+        });
+
+        statusDiv.innerHTML = statusHtml;
+        resultDiv.textContent = JSON.stringify(data.health_report, null, 2);
+
+    } catch (err) {
+        statusDiv.innerHTML = <div class="error">Error: ${err.message}</div>;
+    }
 });
 </script>
+
 
 </body>
 </html>
